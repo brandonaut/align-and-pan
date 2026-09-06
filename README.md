@@ -56,9 +56,12 @@ binaries without fighting cross-compilation locally.
 
 ## Known limitations
 
-- Cross-correlation runs on raw waveforms, not MFCCs, so it's less robust to
-  heavy noise/compression than tools like `audio-offset-finder`. For
-  same-source learning tracks this should be more than sufficient.
+- Cross-correlation runs on whitened waveforms (GCC-PHAT), not MFCCs, so it's
+  less robust to heavy noise/compression than tools like `audio-offset-finder`.
+  For same-source learning tracks this should be more than sufficient.
+- Only a single constant offset is found. If the two files are different
+  performances that drift apart in tempo, no one shift aligns them for the
+  whole track; use `--trim` to lock onto the start and accept tail drift.
 - Resampling (when the two files have different sample rates) is linear
   interpolation — fine for alignment purposes, not audiophile-grade.
 - This has not been compiled/tested in the environment that generated it

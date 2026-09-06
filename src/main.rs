@@ -7,9 +7,11 @@
 //! Pure Rust: symphonia decodes audio (mp3/flac/wav/aac/ogg), no ffmpeg
 //! required. rustfft does the cross-correlation. hound writes the output WAV.
 //!
-//! NOTE: this correlates raw waveforms (not MFCCs), so it's less robust to
-//! heavy noise/compression artifacts than tools like audio-offset-finder --
-//! but for same-source learning tracks that should be plenty.
+//! NOTE: this correlates whitened waveforms (GCC-PHAT, not MFCCs), so it's
+//! less robust to heavy noise/compression artifacts than tools like
+//! audio-offset-finder -- but for same-source learning tracks that should be
+//! plenty. It also assumes a single constant offset: two different
+//! performances that drift apart in tempo cannot be aligned by one shift.
 
 use std::fs::File;
 use std::path::PathBuf;
@@ -40,12 +42,13 @@ struct Args {
     output: PathBuf,
 
     /// Only analyze the first N seconds of each file when finding the offset
-    /// (useful for long files, or to dodge a messy/blown intro)
+    /// (speeds up analysis on long files, and limits the effect of two
+    /// recordings drifting apart in tempo over their length)
     #[arg(long)]
     trim: Option<f64>,
 
     /// Warn if confidence is below this (rough, unitless score)
-    #[arg(long, default_value_t = 5.0)]
+    #[arg(long, default_value_t = 20.0)]
     min_confidence: f32,
 }
 
@@ -194,10 +197,27 @@ fn find_offset(a: &[f32], b: &[f32], sample_rate: u32) -> (f64, f32) {
     fft.process(&mut fa);
     fft.process(&mut fb);
 
+    // Cross-power spectrum with a partial phase transform (GCC-PHAT-beta):
+    // divide each bin by its magnitude raised to `beta`. beta = 1 is pure
+    // PHAT, which whitens the spectrum so the correlation peak stays sharp and
+    // ignores the level/EQ differences between two mixes of the same take;
+    // beta = 0 is plain cross-correlation, which locks onto spurious peaks on
+    // repetitive, level-mismatched material like choral learning tracks but is
+    // steadier on short or low-SNR windows. 0.75 keeps most of PHAT's peak
+    // sharpness without fully amplifying near-silent bins.
+    let beta = 0.75f32;
     let mut cross: Vec<Complex<f32>> = fa
         .iter()
         .zip(fb.iter())
-        .map(|(x, y)| x * y.conj())
+        .map(|(x, y)| {
+            let c = x * y.conj();
+            let mag = c.norm();
+            if mag > 1e-6 {
+                c / mag.powf(beta)
+            } else {
+                Complex::new(0.0, 0.0)
+            }
+        })
         .collect();
 
     ifft.process(&mut cross);

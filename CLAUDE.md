@@ -33,9 +33,11 @@ Everything is in `src/main.rs`, structured as a linear pipeline in `main()`:
    Recoverable `DecodeError` packets are skipped; `UnexpectedEof` ends the loop.
 2. `resample_linear` — if the two files differ in sample rate, both are linearly resampled up to the higher rate.
    Alignment math below assumes both streams share one `target_rate`.
-3. `find_offset` — zero-pads both signals to the next power of two, forward FFT both, multiply one by the conjugate of the other, inverse FFT, take the real part.
+3. `find_offset` — zero-pads both signals to the next power of two, forward FFT both, form the cross-power spectrum (one times the conjugate of the other), then whiten it by dividing each bin by its magnitude to the power `beta` (GCC-PHAT-beta, `beta = 0.75`), inverse FFT, take the real part.
+   Whitening is what makes the peak survive the level/EQ difference between two mixes; plain cross-correlation locked onto a spurious peak on the sample choral tracks.
    The peak index maps to a signed lag (indices past `n/2` wrap to negative), then to `offset_seconds`.
    Confidence is peak value over the correlation RMS — a rough unitless score, not a percentage; `--trim` limits how much audio feeds this step.
+   Only one constant offset is produced: two recordings that drift apart in tempo cannot be aligned across the whole track by a single shift.
 4. Delay padding — the later track is prefixed with `offset_seconds * rate` zero samples so both start together.
    Sign convention: positive `offset_seconds` delays the right track, negative delays the left.
 5. `write_stereo_wav` — interleaves left/right, converts `f32` to `i16` with clamping, writes 16-bit PCM via hound.
