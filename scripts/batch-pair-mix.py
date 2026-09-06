@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Batch-align "part predominant" / "part muted" learning-track pairs.
 
-For every audio file in the input directory whose name contains "predominant"
-or "muted", the base name (with that word removed) is used as a pairing key.
-A key that has both a predominant and a muted file is run through
-align_and_pan -- predominant to the left channel, muted to the right -- with
-align_and_pan writing the MP3 directly (-o *.mp3).
+For every audio file in the input directory whose name carries a predominant
+marker (predominant, predom, either with an optional -left) or a muted marker
+(muted, mute, missing), the base name with that marker removed is used as a
+pairing key. A key that has both a predominant and a muted file is run
+through align_and_pan -- predominant to the left channel, muted to the
+right -- with align_and_pan writing the MP3 directly (-o *.mp3).
 
 Stdlib only; no third-party packages and no shell, so it runs the same on
 Windows and Linux.
@@ -22,6 +23,24 @@ from pathlib import Path
 
 AUDIO_EXTS = {"mp3", "flac", "wav", "m4a", "aac", "ogg", "opus"}
 
+# Substring markers, checked case-insensitively against the file stem.
+PREDOMINANT_MARKERS = ("predom",)
+MUTED_MARKERS = ("mute", "missing")
+
+# Removed from a stem to form the pairing key. Longest variants first so a
+# shorter marker never eats part of a longer one ("predominant" before
+# "predom", "muted" before "mute"). "left" is the optional predominant suffix.
+KEY_STRIP = (
+    "predominant-left",
+    "predom-left",
+    "predominant",
+    "predom",
+    "muted",
+    "mute",
+    "missing",
+    "left",
+)
+
 
 def find_binary(explicit: str | None) -> str:
     if explicit:
@@ -37,8 +56,10 @@ def find_binary(explicit: str | None) -> str:
 
 
 def make_key(stem: str) -> str:
-    """lowercase, drop the role word, non-alphanumerics to '-'."""
-    name = stem.lower().replace("predominant", "").replace("muted", "")
+    """lowercase, drop role markers, non-alphanumerics to '-'."""
+    name = stem.lower()
+    for token in KEY_STRIP:
+        name = name.replace(token, "")
     return re.sub(r"[^a-z0-9]+", "-", name).strip("-")
 
 
@@ -89,9 +110,9 @@ def main() -> None:
         if not entry.is_file() or entry.suffix.lower().lstrip(".") not in AUDIO_EXTS:
             continue
         lc = entry.stem.lower()
-        if "predominant" in lc:
+        if any(m in lc for m in PREDOMINANT_MARKERS):
             role = pred_file
-        elif "muted" in lc:
+        elif any(m in lc for m in MUTED_MARKERS):
             role = muted_file
         else:
             skipped.append(entry.name)
@@ -112,7 +133,7 @@ def main() -> None:
         m = muted_file.get(key)
         if m is None:
             continue
-        mp3 = output_dir / f"{key}.mp3"
+        mp3 = output_dir / f"{key}-Left.mp3"
         print(f"== {key}")
         print(f"   L (predominant): {p.name}")
         print(f"   R (muted):       {m.name}")
