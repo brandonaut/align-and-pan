@@ -133,7 +133,7 @@ fn append_as_mono(buf: &AudioBufferRef, out: &mut Vec<f32>) {
             for i in 0..frames {
                 let mut sum = 0.0f32;
                 for ch in 0..channels {
-                    sum += $buf.chan(ch)[i].into_sample() as f32;
+                    sum += IntoSample::<f32>::into_sample($buf.chan(ch)[i]);
                 }
                 out.push(sum / channels as f32);
             }
@@ -141,7 +141,6 @@ fn append_as_mono(buf: &AudioBufferRef, out: &mut Vec<f32>) {
     }
 
     use symphonia::core::conv::IntoSample;
-    use symphonia::core::sample::Sample;
 
     match buf {
         AudioBufferRef::U8(b) => mixdown!(b),
