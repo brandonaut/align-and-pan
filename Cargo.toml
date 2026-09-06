@@ -1,0 +1,19 @@
+[package]
+name = "align_and_pan"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "align_and_pan"
+path = "src/main.rs"
+
+[dependencies]
+symphonia = { version = "0.5", features = ["mp3", "flac", "wav", "aac", "isomp4", "ogg", "vorbis"] }
+rustfft = "6"
+hound = "3"
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+
+[profile.release]
+opt-level = 3
+lto = true
