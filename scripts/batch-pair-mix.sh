@@ -7,7 +7,7 @@
 # "predominant" or "muted", the base name (with that word removed) is used
 # as a pairing key. A key that has both a predominant and a muted file is
 # run through align_and_pan -- predominant to the left channel, muted to
-# the right -- and the resulting WAV is encoded to MP3 with ffmpeg.
+# the right -- with align_and_pan writing the MP3 directly.
 #
 # Usage:
 #   scripts/batch-pair-mix.sh [-i INPUT_DIR] [-o OUTPUT_DIR] [-b BINARY] [-t TRIM]
@@ -47,7 +47,6 @@ if [[ -z "$binary" ]]; then
   fi
 fi
 
-command -v ffmpeg >/dev/null 2>&1 || { echo "ffmpeg not found on PATH" >&2; exit 1; }
 [[ -d "$input_dir" ]] || { echo "input dir not found: $input_dir" >&2; exit 1; }
 
 mkdir -p "$output_dir"
@@ -109,16 +108,13 @@ for key in "${!pred_file[@]}"; do
   if [[ -z "$m" ]]; then
     continue
   fi
-  wav="$output_dir/$key.wav"
   mp3="$output_dir/$key.mp3"
   echo "== $key"
   echo "   L (predominant): $(basename "$p")"
   echo "   R (muted):       $(basename "$m")"
-  align_args=("$p" "$m" -o "$wav")
+  align_args=("$p" "$m" -o "$mp3")
   [[ -n "$trim" ]] && align_args+=(--trim "$trim")
   "$binary" "${align_args[@]}"
-  ffmpeg -y -loglevel error -i "$wav" -c:a libmp3lame -q:a 2 "$mp3"
-  rm -f "$wav"
   echo "   -> $mp3"
   mixed=$((mixed + 1))
 done
