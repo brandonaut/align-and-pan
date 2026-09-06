@@ -63,6 +63,14 @@ def make_key(stem: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", name).strip("-")
 
 
+def output_stem(pred_stem: str) -> str:
+    """The predominant file's name with its marker (and any -left) rewritten
+    to a single 'Left', so the output keeps the source naming scheme:
+    'Foo - Tenor-Predominant-Left' -> 'Foo - Tenor-Left'."""
+    s = re.sub(r"(?i)predom(?:inant)?(?:[-_ ]*left)?", "Left", pred_stem)
+    return re.sub(r"(?i)left[-_ ]+left", "Left", s)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -134,7 +142,7 @@ def main() -> None:
             role[key] = entry
 
     pairs = [
-        (key, pred_file[key], muted_file[key], output_dir / f"{key}-left.mp3")
+        (key, pred_file[key], muted_file[key], output_dir / f"{output_stem(pred_file[key].stem)}.mp3")
         for key in sorted(pred_file)
         if key in muted_file
     ]
