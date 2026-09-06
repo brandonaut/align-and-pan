@@ -5,8 +5,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 `align_and_pan` is a single-binary Rust CLI.
-It takes two audio files, auto-aligns them via FFT cross-correlation, and writes one stereo WAV with the first file on the left channel and the second on the right.
-It is pure Rust with no ffmpeg dependency.
+It takes two audio files, auto-aligns them via FFT cross-correlation, and writes one stereo file with the first file on the left channel and the second on the right.
+Output is WAV or MP3, selected from the `-o` extension.
+No ffmpeg dependency; MP3 output links LAME, which `mp3lame-sys` builds from bundled C source (so the build host needs a C compiler plus autotools/make).
 
 ## Commands
 
@@ -40,7 +41,9 @@ Everything is in `src/main.rs`, structured as a linear pipeline in `main()`:
    Only one constant offset is produced: two recordings that drift apart in tempo cannot be aligned across the whole track by a single shift.
 4. Delay padding — the later track is prefixed with `offset_seconds * rate` zero samples so both start together.
    Sign convention: positive `offset_seconds` delays the right track, negative delays the left.
-5. `write_stereo_wav` — interleaves left/right, converts `f32` to `i16` with clamping, writes 16-bit PCM via hound.
-   The shorter channel is zero-padded to match the longer.
+5. Output — `output_format` maps the `-o` extension to `Wav` or `Mp3` (any other extension is a hard error, checked right after arg parsing so it fails before the long decode).
+   `write_stereo_wav` interleaves left/right, converts `f32` to `i16` with clamping, writes 16-bit PCM via hound.
+   `write_stereo_mp3` does the same `f32`-to-`i16` interleave, then encodes one shot via `mp3lame-encoder` at 192 kbps CBR, quality Best; `set_sample_rate` rejects non-MPEG rates so a >48 kHz `target_rate` errors here.
+   Either way the shorter channel is zero-padded to match the longer.
 
 The offset sign convention in `find_offset`'s doc comment is load-bearing; changing which argument is `a` vs `b` flips it.

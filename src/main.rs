@@ -1,11 +1,13 @@
 //! align_and_pan
 //!
 //! Auto-aligns two learning tracks using FFT-based cross-correlation, then
-//! pans them into a single stereo WAV file: left_track -> left channel,
-//! right_track -> right channel.
+//! pans them into a single stereo file: left_track -> left channel,
+//! right_track -> right channel. Output is WAV or MP3, picked from the
+//! `-o` extension.
 //!
-//! Pure Rust: symphonia decodes audio (mp3/flac/wav/aac/ogg), no ffmpeg
-//! required. rustfft does the cross-correlation. hound writes the output WAV.
+//! No ffmpeg required: symphonia decodes audio (mp3/flac/wav/aac/ogg),
+//! rustfft does the cross-correlation, hound writes WAV output, and
+//! mp3lame-encoder (LAME) writes MP3 output.
 //!
 //! NOTE: this correlates whitened waveforms (GCC-PHAT, not MFCCs), so it's
 //! less robust to heavy noise/compression artifacts than tools like
@@ -14,7 +16,7 @@
 //! performances that drift apart in tempo cannot be aligned by one shift.
 
 use std::fs::File;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
@@ -37,7 +39,8 @@ struct Args {
     /// Audio file to place in the right channel
     right_track: PathBuf,
 
-    /// Output WAV file path
+    /// Output file path. Container is chosen from the extension:
+    /// `.wav` writes 16-bit PCM, `.mp3` writes a 192 kbps MP3 (via LAME).
     #[arg(short, long, default_value = "combined.wav")]
     output: PathBuf,
 
@@ -275,8 +278,70 @@ fn write_stereo_wav(path: &PathBuf, left: &[f32], right: &[f32], sample_rate: u3
     Ok(())
 }
 
+enum OutputFormat {
+    Wav,
+    Mp3,
+}
+
+fn output_format(path: &Path) -> Result<OutputFormat> {
+    match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("wav") => Ok(OutputFormat::Wav),
+        Some("mp3") => Ok(OutputFormat::Mp3),
+        other => Err(anyhow!(
+            "unsupported output extension {:?}; use .wav or .mp3",
+            other
+        )),
+    }
+}
+
+fn write_stereo_mp3(path: &PathBuf, left: &[f32], right: &[f32], sample_rate: u32) -> Result<()> {
+    use mp3lame_encoder::{Bitrate, Builder, FlushNoGap, InterleavedPcm, Quality};
+
+    let mut builder = Builder::new().ok_or_else(|| anyhow!("failed to create LAME encoder"))?;
+    builder
+        .set_num_channels(2)
+        .map_err(|e| anyhow!("LAME set_num_channels: {e}"))?;
+    builder
+        .set_sample_rate(sample_rate)
+        .map_err(|e| anyhow!("LAME rejected sample rate {sample_rate} (valid: 8/11.025/12/16/22.05/24/32/44.1/48 kHz): {e}"))?;
+    builder
+        .set_brate(Bitrate::Kbps192)
+        .map_err(|e| anyhow!("LAME set_brate: {e}"))?;
+    builder
+        .set_quality(Quality::Best)
+        .map_err(|e| anyhow!("LAME set_quality: {e}"))?;
+    let mut encoder = builder.build().map_err(|e| anyhow!("LAME build: {e}"))?;
+
+    let frames = left.len().max(right.len());
+    let mut interleaved: Vec<i16> = Vec::with_capacity(frames * 2);
+    for i in 0..frames {
+        interleaved.push(f32_to_i16(*left.get(i).unwrap_or(&0.0)));
+        interleaved.push(f32_to_i16(*right.get(i).unwrap_or(&0.0)));
+    }
+
+    let mut mp3: Vec<u8> =
+        Vec::with_capacity(mp3lame_encoder::max_required_buffer_size(frames) + 7200);
+    let n = encoder
+        .encode(InterleavedPcm(&interleaved), mp3.spare_capacity_mut())
+        .map_err(|e| anyhow!("LAME encode: {e}"))?;
+    unsafe { mp3.set_len(mp3.len() + n) };
+    let n = encoder
+        .flush::<FlushNoGap>(mp3.spare_capacity_mut())
+        .map_err(|e| anyhow!("LAME flush: {e}"))?;
+    unsafe { mp3.set_len(mp3.len() + n) };
+
+    std::fs::write(path, &mp3).with_context(|| format!("writing {:?}", path))?;
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
+    let out_format = output_format(&args.output)?;
 
     println!("Decoding {:?}...", args.left_track);
     let left = decode_audio_file(&args.left_track)?;
@@ -302,7 +367,10 @@ fn main() -> Result<()> {
         find_offset(corr_left, corr_right, target_rate)
     };
 
-    println!("Detected offset: {:.3}s (right relative to left)", offset_seconds);
+    println!(
+        "Detected offset: {:.3}s (right relative to left)",
+        offset_seconds
+    );
     println!("Confidence: {:.2}", confidence);
     if confidence < args.min_confidence {
         eprintln!(
@@ -327,7 +395,14 @@ fn main() -> Result<()> {
     }
 
     println!("Writing {:?}...", args.output);
-    write_stereo_wav(&args.output, &left_samples, &right_samples, target_rate)?;
+    match out_format {
+        OutputFormat::Wav => {
+            write_stereo_wav(&args.output, &left_samples, &right_samples, target_rate)?
+        }
+        OutputFormat::Mp3 => {
+            write_stereo_mp3(&args.output, &left_samples, &right_samples, target_rate)?
+        }
+    }
     println!("Done.");
 
     Ok(())
