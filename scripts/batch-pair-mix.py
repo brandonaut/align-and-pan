@@ -91,6 +91,12 @@ def main() -> None:
         default=None,
         help="pass --trim TRIM to align_and_pan [default: none, correlate whole files]",
     )
+    parser.add_argument(
+        "-y",
+        "--yes",
+        action="store_true",
+        help="skip the confirmation prompt and process every pair",
+    )
     args = parser.parse_args()
 
     binary = find_binary(args.binary)
@@ -127,35 +133,50 @@ def main() -> None:
         else:
             role[key] = entry
 
-    mixed = 0
-    for key in sorted(pred_file):
-        p = pred_file[key]
-        m = muted_file.get(key)
-        if m is None:
-            continue
-        mp3 = output_dir / f"{key}-Left.mp3"
-        print(f"== {key}")
-        print(f"   L (predominant): {p.name}")
-        print(f"   R (muted):       {m.name}")
-        cmd = [binary, str(p), str(m), "-o", str(mp3)]
-        if args.trim is not None:
-            cmd += ["--trim", str(args.trim)]
-        subprocess.run(cmd, check=True)
-        print(f"   -> {mp3}")
-        mixed += 1
-
-    print()
-    print(f"mixed {mixed} pair(s) into {output_dir}")
+    pairs = [
+        (key, pred_file[key], muted_file[key], output_dir / f"{key}-left.mp3")
+        for key in sorted(pred_file)
+        if key in muted_file
+    ]
 
     unpaired_pred = [pred_file[k].name for k in sorted(pred_file) if k not in muted_file]
     unpaired_muted = [muted_file[k].name for k in sorted(muted_file) if k not in pred_file]
 
+    for key, p, m, mp3 in pairs:
+        print(f"== {key}")
+        print(f"   L (predominant): {p.name}")
+        print(f"   R (muted):       {m.name}")
+        print(f"   -> {mp3}")
     for name in unpaired_pred:
         print(f"unpaired predominant: {name}")
     for name in unpaired_muted:
         print(f"unpaired muted: {name}")
     for name in skipped:
         print(f"skipped (no role in name): {name}")
+
+    if not pairs:
+        print("\nno pairs to process")
+        return
+
+    print(f"\n{len(pairs)} pair(s) to mix into {output_dir}")
+    if not args.yes:
+        try:
+            reply = input("Proceed? [y/N] ").strip().lower()
+        except EOFError:
+            reply = ""
+        if reply not in ("y", "yes"):
+            print("aborted")
+            return
+
+    for key, p, m, mp3 in pairs:
+        print(f"== {key}")
+        cmd = [binary, str(p), str(m), "-o", str(mp3)]
+        if args.trim is not None:
+            cmd += ["--trim", str(args.trim)]
+        subprocess.run(cmd, check=True)
+        print(f"   -> {mp3}")
+
+    print(f"\nmixed {len(pairs)} pair(s) into {output_dir}")
 
 
 if __name__ == "__main__":
