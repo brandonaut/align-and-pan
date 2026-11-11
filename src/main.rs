@@ -15,11 +15,13 @@
 //! plenty. It also assumes a single constant offset: two different
 //! performances that drift apart in tempo cannot be aligned by one shift.
 
+mod batch;
+
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use hound::{SampleFormat, WavSpec, WavWriter};
 use rustfft::{num_complex::Complex, FftPlanner};
 use symphonia::core::audio::{AudioBufferRef, Signal};
@@ -31,28 +33,76 @@ use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 
 #[derive(Parser)]
-#[command(about = "Auto-align two audio tracks and pan them into a stereo L/R mix")]
+#[command(
+    about = "Auto-align two audio tracks and pan them into a stereo L/R mix",
+    long_about = "Auto-align two audio tracks and pan them into a stereo L/R mix.\n\n\
+        Pair mode:  align_and_pan LEFT RIGHT [-o out.wav|out.mp3]\n\
+        Batch mode: align_and_pan DIR [-o OUTDIR]\n\n\
+        In batch mode every file in DIR whose name carries a predominant marker \
+        (default: 'predom') is paired with the file carrying a muted marker \
+        (default: 'mute', 'missing') and the same base name. The predominant \
+        file goes to the left channel, the muted file to the right.",
+    override_usage = "align_and_pan [OPTIONS] <LEFT> <RIGHT>\n       align_and_pan [OPTIONS] <DIR>"
+)]
 struct Args {
-    /// Audio file to place in the left channel
-    left_track: PathBuf,
+    /// Two audio files (LEFT RIGHT) for a single mix, or one directory to batch-process
+    #[arg(required = true, num_args = 1..=2, value_name = "LEFT RIGHT | DIR")]
+    inputs: Vec<PathBuf>,
 
-    /// Audio file to place in the right channel
-    right_track: PathBuf,
-
-    /// Output file path. Container is chosen from the extension:
-    /// `.wav` writes 16-bit PCM, `.mp3` writes a 192 kbps MP3 (via LAME).
-    #[arg(short, long, default_value = "combined.wav")]
-    output: PathBuf,
+    /// Pair mode: output file; container is chosen from the extension
+    /// (`.wav` = 16-bit PCM, `.mp3` = 192 kbps via LAME) [default: combined.wav].
+    /// Batch mode: output directory [default: ./mixed].
+    #[arg(short, long)]
+    output: Option<PathBuf>,
 
     /// Only analyze the first N seconds of each file when finding the offset
     /// (speeds up analysis on long files, and limits the effect of two
     /// recordings drifting apart in tempo over their length)
-    #[arg(long)]
+    #[arg(short, long)]
     trim: Option<f64>,
 
     /// Warn if confidence is below this (rough, unitless score)
     #[arg(long, default_value_t = 20.0)]
     min_confidence: f32,
+
+    /// [batch] Output format [default: mp3]
+    #[arg(long, value_enum)]
+    format: Option<OutputFormat>,
+
+    /// [batch] Also process subdirectories; pairs are matched within each
+    /// directory and the tree is mirrored under the output directory
+    #[arg(short, long)]
+    recursive: bool,
+
+    /// [batch] Skip the confirmation prompt (also skipped when stdin is not a terminal)
+    #[arg(short, long)]
+    yes: bool,
+
+    /// [batch] Show the pairing table and exit without encoding anything
+    #[arg(short = 'n', long)]
+    dry_run: bool,
+
+    /// [batch] Number of pairs to process in parallel [default: CPU count, max 4]
+    #[arg(short, long)]
+    jobs: Option<usize>,
+
+    /// [batch] Replace output files that already exist
+    #[arg(long, conflicts_with = "skip_existing")]
+    overwrite: bool,
+
+    /// [batch] Skip pairs whose output file already exists (the default)
+    #[arg(long)]
+    skip_existing: bool,
+
+    /// [batch] Filename marker identifying the predominant (left) file.
+    /// Case-insensitive substring; repeatable. Replaces the default ('predom').
+    #[arg(long, value_name = "TEXT")]
+    predominant_marker: Vec<String>,
+
+    /// [batch] Filename marker identifying the muted (right) file.
+    /// Case-insensitive substring; repeatable. Replaces the defaults ('mute', 'missing').
+    #[arg(long, value_name = "TEXT")]
+    muted_marker: Vec<String>,
 }
 
 struct Decoded {
@@ -60,7 +110,7 @@ struct Decoded {
     sample_rate: u32,
 }
 
-fn decode_audio_file(path: &PathBuf) -> Result<Decoded> {
+fn decode_audio_file(path: &Path) -> Result<Decoded> {
     let file = File::open(path).with_context(|| format!("opening {:?}", path))?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
 
@@ -257,7 +307,7 @@ fn f32_to_i16(x: f32) -> i16 {
     (x.clamp(-1.0, 1.0) * i16::MAX as f32) as i16
 }
 
-fn write_stereo_wav(path: &PathBuf, left: &[f32], right: &[f32], sample_rate: u32) -> Result<()> {
+fn write_stereo_wav(path: &Path, left: &[f32], right: &[f32], sample_rate: u32) -> Result<()> {
     let spec = WavSpec {
         channels: 2,
         sample_rate,
@@ -278,9 +328,19 @@ fn write_stereo_wav(path: &PathBuf, left: &[f32], right: &[f32], sample_rate: u3
     Ok(())
 }
 
-enum OutputFormat {
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub(crate) enum OutputFormat {
     Wav,
     Mp3,
+}
+
+impl OutputFormat {
+    pub(crate) fn extension(self) -> &'static str {
+        match self {
+            OutputFormat::Wav => "wav",
+            OutputFormat::Mp3 => "mp3",
+        }
+    }
 }
 
 fn output_format(path: &Path) -> Result<OutputFormat> {
@@ -299,7 +359,7 @@ fn output_format(path: &Path) -> Result<OutputFormat> {
     }
 }
 
-fn write_stereo_mp3(path: &PathBuf, left: &[f32], right: &[f32], sample_rate: u32) -> Result<()> {
+fn write_stereo_mp3(path: &Path, left: &[f32], right: &[f32], sample_rate: u32) -> Result<()> {
     use mp3lame_encoder::{Bitrate, Builder, FlushNoGap, InterleavedPcm, Quality};
 
     let mut builder = Builder::new().ok_or_else(|| anyhow!("failed to create LAME encoder"))?;
@@ -339,22 +399,44 @@ fn write_stereo_mp3(path: &PathBuf, left: &[f32], right: &[f32], sample_rate: u3
     Ok(())
 }
 
-fn main() -> Result<()> {
-    let args = Args::parse();
-    let out_format = output_format(&args.output)?;
+pub(crate) struct AlignOptions {
+    pub trim: Option<f64>,
+    pub min_confidence: f32,
+}
 
-    println!("Decoding {:?}...", args.left_track);
-    let left = decode_audio_file(&args.left_track)?;
-    println!("Decoding {:?}...", args.right_track);
-    let right = decode_audio_file(&args.right_track)?;
+pub(crate) struct Outcome {
+    pub offset_seconds: f64,
+    pub confidence: f32,
+}
+
+/// Decode, align and mix one pair into `out`. With `verbose`, progress and the
+/// low-confidence warning are printed; otherwise the caller reports.
+pub(crate) fn align_pair(
+    left_path: &Path,
+    right_path: &Path,
+    out: &Path,
+    format: OutputFormat,
+    opts: &AlignOptions,
+    verbose: bool,
+) -> Result<Outcome> {
+    if verbose {
+        println!("Decoding {:?}...", left_path);
+    }
+    let left = decode_audio_file(left_path)?;
+    if verbose {
+        println!("Decoding {:?}...", right_path);
+    }
+    let right = decode_audio_file(right_path)?;
 
     let target_rate = left.sample_rate.max(right.sample_rate);
     let mut left_samples = resample_linear(&left.samples, left.sample_rate, target_rate);
     let mut right_samples = resample_linear(&right.samples, right.sample_rate, target_rate);
 
-    println!("Finding offset...");
+    if verbose {
+        println!("Finding offset...");
+    }
     let (offset_seconds, confidence) = {
-        let (corr_left, corr_right): (&[f32], &[f32]) = match args.trim {
+        let (corr_left, corr_right): (&[f32], &[f32]) = match opts.trim {
             Some(trim_secs) => {
                 let n = (trim_secs * target_rate as f64) as usize;
                 (
@@ -367,17 +449,19 @@ fn main() -> Result<()> {
         find_offset(corr_left, corr_right, target_rate)
     };
 
-    println!(
-        "Detected offset: {:.3}s (right relative to left)",
-        offset_seconds
-    );
-    println!("Confidence: {:.2}", confidence);
-    if confidence < args.min_confidence {
-        eprintln!(
-            "Warning: confidence is below {:.2} -- the detected offset may be unreliable. \
-             Consider checking alignment manually, or try --trim to skip a messy intro.",
-            args.min_confidence
+    if verbose {
+        println!(
+            "Detected offset: {:.3}s (right relative to left)",
+            offset_seconds
         );
+        println!("Confidence: {:.2}", confidence);
+        if confidence < opts.min_confidence {
+            eprintln!(
+                "Warning: confidence is below {:.2} -- the detected offset may be unreliable. \
+                 Consider checking alignment manually, or try --trim to skip a messy intro.",
+                opts.min_confidence
+            );
+        }
     }
 
     let delay_right_samples = (offset_seconds.max(0.0) * target_rate as f64).round() as usize;
@@ -394,16 +478,87 @@ fn main() -> Result<()> {
         right_samples = padded;
     }
 
-    println!("Writing {:?}...", args.output);
-    match out_format {
-        OutputFormat::Wav => {
-            write_stereo_wav(&args.output, &left_samples, &right_samples, target_rate)?
-        }
-        OutputFormat::Mp3 => {
-            write_stereo_mp3(&args.output, &left_samples, &right_samples, target_rate)?
-        }
+    if verbose {
+        println!("Writing {:?}...", out);
     }
-    println!("Done.");
+    match format {
+        OutputFormat::Wav => write_stereo_wav(out, &left_samples, &right_samples, target_rate)?,
+        OutputFormat::Mp3 => write_stereo_mp3(out, &left_samples, &right_samples, target_rate)?,
+    }
 
-    Ok(())
+    Ok(Outcome {
+        offset_seconds,
+        confidence,
+    })
+}
+
+fn main() -> Result<()> {
+    let args = Args::parse();
+    let opts = AlignOptions {
+        trim: args.trim,
+        min_confidence: args.min_confidence,
+    };
+
+    match args.inputs.as_slice() {
+        [dir] if dir.is_dir() => {
+            let jobs = args.jobs.unwrap_or_else(|| {
+                std::thread::available_parallelism()
+                    .map(|n| n.get())
+                    .unwrap_or(1)
+                    .min(4)
+            });
+            if jobs == 0 {
+                return Err(anyhow!("--jobs must be at least 1"));
+            }
+            let cfg = batch::BatchConfig {
+                input_dir: dir.clone(),
+                output_dir: args.output.unwrap_or_else(|| PathBuf::from("./mixed")),
+                format: args.format.unwrap_or(OutputFormat::Mp3),
+                recursive: args.recursive,
+                yes: args.yes,
+                dry_run: args.dry_run,
+                jobs,
+                overwrite: args.overwrite,
+                predominant_markers: args.predominant_marker,
+                muted_markers: args.muted_marker,
+                opts,
+            };
+            if !batch::run(&cfg)? {
+                std::process::exit(1);
+            }
+            Ok(())
+        }
+        [one] => Err(anyhow!(
+            "{:?} is not a directory; pass a directory, or two audio files (LEFT RIGHT)",
+            one
+        )),
+        [left, right] => {
+            let batch_only = args.format.is_some()
+                || args.recursive
+                || args.yes
+                || args.dry_run
+                || args.jobs.is_some()
+                || args.overwrite
+                || args.skip_existing
+                || !args.predominant_marker.is_empty()
+                || !args.muted_marker.is_empty();
+            if batch_only {
+                return Err(anyhow!(
+                    "options marked [batch] only apply when the input is a directory"
+                ));
+            }
+            if left.is_dir() || right.is_dir() {
+                return Err(anyhow!(
+                    "pair mode needs two audio files; for a directory pass it alone"
+                ));
+            }
+            let output = args.output.unwrap_or_else(|| PathBuf::from("combined.wav"));
+            // Checked before the long decode so a bad extension fails fast.
+            let format = output_format(&output)?;
+            align_pair(left, right, &output, format, &opts, true)?;
+            println!("Done.");
+            Ok(())
+        }
+        _ => unreachable!("clap enforces 1..=2 inputs"),
+    }
 }

@@ -24,18 +24,46 @@ The build host therefore needs a C compiler plus `autoconf`, `automake`, `libtoo
 
 ## Usage
 
+Two modes, chosen by the arguments:
+
 ```bash
-./align_and_pan left_track.mp3 right_track.mp3 -o combined.wav
+# Pair mode: two files -> one stereo file
 ./align_and_pan left_track.mp3 right_track.mp3 -o combined.mp3
 ./align_and_pan left_track.mp3 right_track.mp3 -o combined.wav --trim 30
+
+# Batch mode: one directory -> a folder of mixes
+./align_and_pan ./tracks                      # scan, show pairs, confirm, write to ./mixed
+./align_and_pan ./tracks -o ./out -y -j 4
+./align_and_pan ./tracks -n                   # dry run: only show the pairing table
+./align_and_pan ./tracks -r                   # include subdirectories
 ```
 
-- `-o FILE` — output path; `.wav` writes 16-bit PCM, `.mp3` writes a 192 kbps MP3.
-  Any other extension is an error.
-- `--trim N` — only use the first N seconds of each file to compute the offset
+Options for both modes:
+
+- `-o PATH` — pair mode: output file (`.wav` = 16-bit PCM, `.mp3` = 192 kbps MP3; any
+  other extension is an error; default `combined.wav`). Batch mode: output directory
+  (default `./mixed`).
+- `-t, --trim N` — only use the first N seconds of each file to compute the offset
   (skip a messy/blown intro, or speed up analysis on long files).
 - `--min-confidence N` — warn if the correlation confidence is below N
-  (default 5.0; this is a rough, unitless score, not a percentage).
+  (default 20.0; a rough, unitless score, not a percentage).
+
+Batch mode (`[batch]` options are an error in pair mode):
+
+- Files are paired by name: one carrying a predominant marker (default `predom`, so
+  `predominant`, `Predominant-Left`, ...) with the one carrying a muted marker (default
+  `mute`, `missing`) and the same remaining base name. Predominant goes left, muted
+  right. Output is named after the predominant file with the marker rewritten to `Left`.
+- `--format mp3|wav` — output format (default `mp3`).
+- `-r, --recursive` — descend into subdirectories; pairs are matched within each
+  directory and the tree is mirrored under the output directory.
+- `-y, --yes` — skip the confirmation prompt (it is also skipped when stdin is not a terminal).
+- `-n, --dry-run` — print the pairing table and exit.
+- `-j, --jobs N` — pairs processed in parallel (default: CPU count, max 4).
+- `--overwrite` / `--skip-existing` — replace existing outputs, or skip them (default).
+- `--predominant-marker TEXT` / `--muted-marker TEXT` — repeatable, case-insensitive
+  substrings that replace the default markers.
+- A failing pair is reported and the rest continue; the exit code is 1 if any failed.
 
 ## Cross-compiling for distribution
 

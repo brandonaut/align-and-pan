@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 `align_and_pan` is a single-binary Rust CLI.
-It takes two audio files, auto-aligns them via FFT cross-correlation, and writes one stereo file with the first file on the left channel and the second on the right.
+It takes two audio files (or a directory of predominant/muted pairs), auto-aligns each pair via FFT cross-correlation, and writes a stereo file with the first file on the left channel and the second on the right.
 Output is WAV or MP3, selected from the `-o` extension.
 No ffmpeg dependency; MP3 output links LAME, which `mp3lame-sys` builds from bundled C source (so the build host needs a C compiler plus autotools/make).
 
@@ -28,7 +28,9 @@ Cross-compilation notes (Windows/Linux from Linux, macOS needs a mac or CI) live
 
 ## Architecture
 
-Everything is in `src/main.rs`, structured as a linear pipeline in `main()`:
+`src/main.rs` holds the audio pipeline (`align_pair`) and CLI dispatch; `src/batch.rs` holds directory mode (pairing by filename marker, `--recursive` scan, parallel worker threads, keep-going failure summary), which calls `align_pair` per pair.
+`main()` picks the mode from the positional args: one directory = batch, two files = pair, anything else is a usage error.
+`align_pair` is a linear pipeline:
 
 1. `decode_audio_file` — symphonia probes the container, picks the first audio track, decodes every packet, and downmixes to mono `f32` via `append_as_mono`.
    Recoverable `DecodeError` packets are skipped; `UnexpectedEof` ends the loop.
